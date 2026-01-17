@@ -1,0 +1,25 @@
+<nav class="border-b border-gray-200 bg-white">
+  <div class="mx-auto max-w-6xl px-6 py-4 flex items-center gap-6">
+    <a
+      routerLink="/home"
+      routerLinkActive="text-blue-600 border-b-2 border-blue-600"
+      ariaCurrentWhenActive="page"
+      class="pb-1 text-sm font-medium text-gray-700 hover:text-blue-600 transition"
+    >
+      Home
+    </a>
+
+    <a
+      routerLink="/docs"
+      routerLinkActive="text-blue-600 border-b-2 border-blue-600"
+      ariaCurrentWhenActive="page"
+      class="pb-1 text-sm font-medium text-gray-700 hover:text-blue-600 transition"
+    >
+      Docs
+    </a>
+  </div>
+</nav>
+
+<main class="mx-auto max-w-6xl px-6 py-8">
+  <router-outlet />
+</main>
