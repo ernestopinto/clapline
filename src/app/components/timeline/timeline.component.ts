@@ -9,10 +9,12 @@ import {
   inject,
 } from '@angular/core';
 import { ClapVideoSourceService } from '../../services/clap-video-source.service';
+import {CommonModule} from '@angular/common';
 
 @Component({
   selector: 'app-timeline',
   standalone: true,
+  imports: [CommonModule],
   templateUrl: './timeline.component.html',
 })
 export class TimelineComponent implements AfterViewInit, OnDestroy {
@@ -28,12 +30,11 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   private readonly paddingX = 12;
   private readonly rulerHeight = 36;
   private readonly lanePaddingTop = 10;
+  private readonly laneHeight = 64;
 
-  private readonly laneHeight = 64; // 👈 adjust freely (48 / 56 / 64 are good)
-
-  // View window (seconds) — THIS makes zoom keep same width
+  // View window (seconds)
   private viewStart = 0;
-  private viewEnd = 10; // will be set to duration when metadata arrives
+  private viewEnd = 10; // set to duration when metadata arrives
 
   // Derived scale
   pxPerSecond = 80;
@@ -45,23 +46,49 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
   private isScrubbingLocal = false;
 
-  // ✅ Effects must be created in injection context
+  private viewReady = false;
+  private hasCtx = false;
+
+  // ---- overlay bindings ----
+  showSubOverlay = false;
+  subOverlayLeftPx = 0;
+  subOverlayTopPx = 6; // near the top; adjust if you want it lower
+  subOverlayWidthPx = 120;
+  subOverlayLabel = '';
+
   private readonly _onDuration = effect(() => {
     const d = this.video.duration();
     if (d > 0) {
-      // Default view: full clip visible
       this.viewStart = 0;
       this.viewEnd = d;
       this.recomputeScale();
+    } else {
+      // If duration is 0, we should still try to render if we have a selected source
+      // but maybe it's too early.
+      this.requestRender();
     }
-    this.requestRender();
+    if (this.viewReady && this.hasCtx) this.updateOverlay();
   });
 
   private readonly _onTime = effect(() => {
     this.video.currentTime();
+    if (this.viewReady && this.hasCtx) this.updateOverlay();
     this.requestRender();
   });
 
+  private readonly _onSubSection = effect(() => {
+    this.video.subIn();
+    this.video.subOut();
+    this.video.isPlayingSubSection();
+    this.video.duration();
+    this.video.selectedSource();
+    this.video.videoSources(); // Track sources too just in case
+    if (!this.viewReady || !this.hasCtx) return;
+    this.updateOverlay();
+    this.requestRender();
+  });
+
+  // ---- template getters ----
   get currentTime(): number {
     return this.video.currentTime();
   }
@@ -76,11 +103,15 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     return this.paddingX + (clamped - this.viewStart) * this.pxPerSecond;
   }
 
+  // ---- lifecycle ----
   ngAfterViewInit(): void {
     const canvas = this.canvasRef.nativeElement;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('2D canvas context not available');
     this.ctx = ctx;
+
+    this.hasCtx = true;
+    this.viewReady = true;
 
     this.zone.runOutsideAngular(() => {
       this.ro = new ResizeObserver(() => this.resizeAndRender());
@@ -95,14 +126,13 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
   }
 
+  // ---- zoom ----
   zoomIn(): void {
     const d = this.duration;
     if (!(d > 0)) return;
 
     const center = this.currentTime;
     const currentSpan = this.viewEnd - this.viewStart;
-
-    // zoom in = smaller window
     const newSpan = Math.max(1, currentSpan / 1.5);
 
     this.setViewWindowCentered(center, newSpan, d);
@@ -114,26 +144,30 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
     const center = this.currentTime;
     const currentSpan = this.viewEnd - this.viewStart;
-
-    // zoom out = larger window (but never bigger than full duration)
     const newSpan = Math.min(d, currentSpan * 1.5);
 
     this.setViewWindowCentered(center, newSpan, d);
   }
 
+  // ---- pointer scrubbing ----
   onPointerDown(ev: PointerEvent): void {
     this.isScrubbingLocal = true;
     this.video.beginScrub();
 
     this.stageRef.nativeElement.setPointerCapture(ev.pointerId);
-    this.seekFromClientX(ev.clientX);
+
+    // ✅ update playhead + TCIN immediately
+    this.seekFromClientX(ev.clientX, true);
 
     ev.preventDefault();
   }
 
   onPointerMove(ev: PointerEvent): void {
     if (!this.isScrubbingLocal) return;
-    this.seekFromClientX(ev.clientX);
+
+    // ✅ TCIN follows while dragging
+    this.seekFromClientX(ev.clientX, true);
+
     ev.preventDefault();
   }
 
@@ -142,7 +176,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     this.video.endScrub();
   }
 
-  private seekFromClientX(clientX: number): void {
+  private seekFromClientX(clientX: number, updateSubIn: boolean): void {
     const canvas = this.canvasRef.nativeElement;
     const rect = canvas.getBoundingClientRect();
 
@@ -150,11 +184,43 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     const timelineX = x - this.paddingX;
 
     const t = this.viewStart + (timelineX / this.pxPerSecond);
+
     this.video.setTimeFromTimeline(t);
+
+    if (updateSubIn) {
+      // ✅ only IN changes while scrubbing
+      this.video.setSubIn(t);
+    }
 
     this.requestRender();
   }
 
+  // ---- overlay actions ----
+  confirmSubSection(): void {
+    const a = this.video.subIn();
+    const b = this.video.subOut();
+    if (a == null || b == null) return;
+
+    alert('✅ I checked!');
+
+    this.video.setSubIn(null);
+    this.video.setSubOut(null);
+    this.updateOverlay();
+    this.requestRender();
+
+    // later:
+    // this.video.addSubSection({ in: a, out: b });
+  }
+
+  clearSubSection(): void {
+    alert('❌ I escaped!');
+    this.video.setSubIn(null);
+    this.video.setSubOut(null);
+    this.updateOverlay();
+    this.requestRender();
+  }
+
+  // ---- layout math ----
   private setViewWindowCentered(center: number, span: number, duration: number): void {
     const half = span / 2;
 
@@ -185,6 +251,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
     const span = Math.max(0.001, this.viewEnd - this.viewStart);
     this.pxPerSecond = usableW / span;
+    this.requestRender();
   }
 
   private resizeAndRender(): void {
@@ -199,7 +266,6 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     if (canvas.width !== w) canvas.width = w;
     if (canvas.height !== h) canvas.height = h;
 
-    // keep scale correct on resize
     if (this.duration > 0) this.recomputeScale();
 
     this.requestRender();
@@ -214,7 +280,10 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     });
   }
 
+  // ---- drawing ----
   private render(): void {
+    if (!this.hasCtx) return;
+
     const canvas = this.canvasRef.nativeElement;
     const ctx = this.ctx;
 
@@ -229,12 +298,15 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     const cssW = w / this.dpr;
     const cssH = h / this.dpr;
 
+    // bg
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, cssW, cssH);
 
+    // ruler bg
     ctx.fillStyle = '#f9fafb';
     ctx.fillRect(0, 0, cssW, this.rulerHeight);
 
+    // separator
     ctx.strokeStyle = '#e5e7eb';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -242,13 +314,26 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     ctx.lineTo(cssW, this.rulerHeight + 0.5);
     ctx.stroke();
 
+    // lane bg
     ctx.fillStyle = '#f3f4f6';
     ctx.fillRect(0, this.rulerHeight, cssW, cssH - this.rulerHeight);
 
-    this.drawLane(ctx, cssW, cssH);
+    this.drawLane(ctx, cssW);
     this.drawRuler(ctx, cssW);
 
+    // SUBSECTIONS after the Lane drawing
+
+    // subsection overlay on lane
+    this.drawSubSection(ctx, cssW);
+    // loaded subsections
+    this.drawSourceSubSections(ctx, cssW);
+
+    ///////////////////////////////////////
+
     ctx.restore();
+
+    // update floating overlay position
+    this.updateOverlay();
   }
 
   private drawRuler(ctx: CanvasRenderingContext2D, cssW: number): void {
@@ -266,7 +351,6 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
     const span = this.viewEnd - this.viewStart;
 
-    // choose tick step based on visible span
     let minorEvery = 1;
     if (span > 60) minorEvery = 5;
     if (span > 180) minorEvery = 10;
@@ -299,13 +383,13 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     }
   }
 
-  private drawLane(ctx: CanvasRenderingContext2D, cssW: number, _cssH: number): void {
+  private drawLane(ctx: CanvasRenderingContext2D, cssW: number): void {
     const laneTop = this.rulerHeight + this.lanePaddingTop;
 
     const x = this.paddingX;
     const w = cssW - this.paddingX * 2;
     const y = laneTop;
-    const h = this.laneHeight; // ✅ fixed, smaller height
+    const h = this.laneHeight;
 
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(x, y, w, h);
@@ -315,10 +399,163 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
   }
 
+  private drawSourceSubSections(ctx: CanvasRenderingContext2D, cssW: number): void {
+    const source = this.video.selectedSource();
+    if (!source || !source.subSections || source.subSections.length === 0) return;
+
+    // We can draw even if duration is 0, but timeToX needs a sane pxPerSecond.
+    // If duration is 0, viewEnd might be 10 (default), which is fine for dummy data.
+
+    const laneTop = this.rulerHeight + this.lanePaddingTop;
+    const y = laneTop;
+    const h = this.laneHeight;
+    const minX = this.paddingX;
+    const maxX = cssW - this.paddingX;
+
+    for (const sub of source.subSections) {
+      const tIn = this.parseHHMMSS(sub.tcin);
+      const tOut = this.parseHHMMSS(sub.tcout);
+
+      const x1 = this.timeToX(tIn);
+      const x2 = this.timeToX(tOut);
+
+      const left = Math.min(x1, x2);
+      const right = Math.max(x1, x2);
+
+      const cl = Math.max(minX, Math.min(maxX, left));
+      const cr = Math.max(minX, Math.min(maxX, right));
+      const width = cr - cl;
+
+      if (width <= 0) continue;
+
+      ctx.save();
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#22c55e'; // green-500
+      ctx.fillRect(cl, y, width, h);
+
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = '#16a34a'; // green-600
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cl + 0.5, y + 0.5, width - 1, h - 1);
+      ctx.restore();
+    }
+  }
+
+  private parseHHMMSS(tc: string): number {
+    const parts = tc.split(':').map(Number);
+    if (parts.length === 3) {
+      return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+    if (parts.length === 2) {
+      return parts[0] * 60 + parts[1];
+    }
+    return parts[0] || 0;
+  }
+
+  private drawSubSection(ctx: CanvasRenderingContext2D, cssW: number): void {
+    const a = this.video.subIn();
+    const b = this.video.subOut();
+
+    if (a == null || b == null) return;
+
+    const x1 = this.timeToX(a);
+    const x2 = this.timeToX(b);
+
+    const left = Math.min(x1, x2);
+    const right = Math.max(x1, x2);
+
+    const laneTop = this.rulerHeight + this.lanePaddingTop;
+    const y = laneTop;
+    const h = this.laneHeight;
+
+    const minX = this.paddingX;
+    const maxX = cssW - this.paddingX;
+
+    const cl = Math.max(minX, Math.min(maxX, left));
+    const cr = Math.max(minX, Math.min(maxX, right));
+    const width = Math.max(1, cr - cl);
+
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = '#2563eb';
+    ctx.fillRect(cl, y, width, h);
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    ctx.strokeStyle = '#1d4ed8';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(cl + 0.5, y + 0.5, width - 1, h - 1);
+    ctx.restore();
+  }
+
+  // ---- overlay positioning ----
+  private updateOverlay(): void {
+    const d = this.video.duration();
+    const a = this.video.subIn();
+    const b = this.video.subOut();
+    const isPlayingSubSection = this.video.isPlayingSubSection();
+
+    if (
+      isPlayingSubSection ||
+      !(d > 0) ||
+      a == null ||
+      b == null ||
+      Math.abs(a - b) < 0.001
+    ) {
+      this.showSubOverlay = false;
+      return;
+    }
+
+    const canvasCssW = this.canvasRef.nativeElement.width / this.dpr;
+
+    const x1 = this.timeToX(a);
+    const x2 = this.timeToX(b);
+
+    const left = Math.min(x1, x2);
+    const right = Math.max(x1, x2);
+
+    const minX = this.paddingX;
+    const maxX = canvasCssW - this.paddingX;
+
+    const cl = Math.max(minX, Math.min(maxX, left));
+    const cr = Math.max(minX, Math.min(maxX, right));
+
+    const w = Math.max(110, cr - cl); // ensure buttons fit
+
+    this.showSubOverlay = true;
+    this.subOverlayLeftPx = cl;
+    this.subOverlayWidthPx = w;
+    this.subOverlayLabel = `${this.formatTimeOverlay(a)} → ${this.formatTimeOverlay(b)}`;
+  }
+
+  private timeToX(t: number): number {
+    return this.paddingX + (t - this.viewStart) * this.pxPerSecond;
+  }
+
   private formatTime(t: number): string {
     const sec = Math.floor(Math.max(0, t));
     const m = Math.floor(sec / 60);
     const s = sec % 60;
     return m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `${s}s`;
   }
+
+  private formatTimeOverlay(t: number): string {
+    const total = Math.max(0, t);
+    const m = Math.floor(total / 60);
+    const s = total - m * 60;
+    const ss = s.toFixed(2).padStart(5, '0'); // "03.25"
+    return m > 0 ? `${m}:${ss}` : `${ss}s`;
+  }
+
+  onConfirmPointerDown(ev: PointerEvent): void {
+    ev.stopPropagation();
+    ev.preventDefault();
+  }
+
+  onCancelPointerDown(ev: PointerEvent): void {
+    ev.stopPropagation();
+    ev.preventDefault();
+  }
+
 }

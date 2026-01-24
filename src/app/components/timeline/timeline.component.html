@@ -34,6 +34,47 @@
   >
     <canvas #canvas class="block w-full h-[130px] bg-white"></canvas>
 
+    <!-- ✅ SUBSECTION CONFIRM OVERLAY -->
+    <div
+      *ngIf="showSubOverlay"
+      class="absolute z-20"
+      [style.left.px]="subOverlayLeftPx"
+      [style.top.px]="subOverlayTopPx"
+      style="pointer-events: none;"
+    >
+      <div
+        class="flex items-center gap-1 rounded-lg border border-gray-200 bg-white/95 shadow-sm px-2 py-1"
+        [style.width.px]="subOverlayWidthPx"
+      >
+        <div class="text-[11px] text-gray-700 font-mono whitespace-nowrap truncate">
+          {{ subOverlayLabel }}
+        </div>
+
+        <div class="ml-auto flex items-center gap-1" style="pointer-events: auto;">
+          <button
+            type="button"
+            class="rounded-md px-2 py-1 text-[11px] font-semibold bg-blue-600 text-white hover:bg-blue-700"
+            (pointerdown)="onConfirmPointerDown($event)"
+            (click)="confirmSubSection()"
+            title="Confirm subsection"
+          >
+            ✓
+          </button>
+
+          <button
+            type="button"
+            class="rounded-md px-2 py-1 text-[11px] font-semibold bg-gray-100 text-gray-800 hover:bg-gray-200"
+            (pointerdown)="onCancelPointerDown($event)"
+            (click)="clearSubSection()"
+            title="Clear subsection"
+          >
+            ✕
+          </button>
+
+        </div>
+      </div>
+    </div>
+
     <!-- SCRUB PIN (overlay element) -->
     <div
       class="absolute top-0 bottom-0 cursor-ew-resize"
