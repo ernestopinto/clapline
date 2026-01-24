@@ -1,7 +1,6 @@
-import { AfterViewInit, Component, ElementRef, ViewChild } from '@angular/core';
+import { AfterViewInit, Component, ElementRef, ViewChild, signal, effect } from '@angular/core';
 import { ClapVideoSourceService } from '../../services/clap-video-source.service';
-
-type VideoKey = 'anabela' | 'woman' | 'woman2';
+import { VideoSubSectionDTO } from '../../models/video-source.dto';
 
 @Component({
   selector: 'app-videosource',
@@ -12,29 +11,57 @@ export class VideoSourceComponent implements AfterViewInit {
   @ViewChild('videoEl', { static: true })
   private readonly videoEl!: ElementRef<HTMLVideoElement>;
 
-  selected: VideoKey = 'anabela';
-  videoSrc = this.toSrc(this.selected);
-
   // ✅ Only TCOUT is user typed now
   tcOutText = '';
 
-  constructor(public readonly video: ClapVideoSourceService) {}
+  constructor(public readonly video: ClapVideoSourceService) {
+    // Default selection once sources are loaded
+    effect(() => {
+      const sources = this.video.videoSources();
+      if (sources.length > 0 && !this.video.selectedSource()) {
+        const defaultSource = sources[2] || sources[0];
+        this.video.selectedSource.set(defaultSource);
+
+        // Trigger initial video load if view is already ready
+        if (this.videoEl) {
+          const el = this.videoEl.nativeElement;
+          el.src = defaultSource.url;
+          el.load();
+          this.video.connectVideo(el);
+        }
+      }
+    });
+
+    // Keep TCOUT input in sync when subsection is cleared elsewhere.
+    effect(() => {
+      const subIn = this.video.subIn();
+      const subOut = this.video.subOut();
+      if (subIn == null && subOut == null && this.tcOutText !== '') {
+        this.tcOutText = '';
+      }
+    });
+  }
+
+  get videoSrc(): string {
+    return this.video.selectedSource()?.url ?? '';
+  }
 
   // ---------- lifecycle ----------
   ngAfterViewInit(): void {
     const el = this.videoEl.nativeElement;
 
-    el.src = this.videoSrc;
-    el.load();
-
-    this.video.connectVideo(el);
+    if (this.video.selectedSource()) {
+      el.src = this.videoSrc;
+      el.load();
+      this.video.connectVideo(el);
+    }
   }
 
   // ---------- UI events ----------
   onSourceChange(event: Event): void {
-    const value = (event.target as HTMLSelectElement).value as VideoKey;
-    this.selected = value;
-    this.videoSrc = this.toSrc(value);
+    const url = (event.target as HTMLSelectElement).value;
+    const source = this.video.videoSources().find(s => s.url === url) || null;
+    this.video.selectedSource.set(source);
 
     const el = this.videoEl.nativeElement;
     el.pause();
@@ -57,6 +84,37 @@ export class VideoSourceComponent implements AfterViewInit {
     this.video.setSubOut(out); // ✅ only OUT
   }
 
+  onSubSectionTimeInput(
+    index: number,
+    field: 'tcin' | 'tcout',
+    rawValue: string,
+  ): void {
+    this.video.updateSubSectionByIndex(index, field, rawValue);
+  }
+
+  onSubSectionNameInput(index: number, rawValue: string): void {
+    this.video.updateSubSectionByIndex(index, 'name', rawValue);
+  }
+
+  toSecondsValue(tc: string): string {
+    const seconds = parseTimecodeToSeconds(tc);
+    return seconds == null ? '' : String(seconds);
+  }
+
+  editSubsection(sub: VideoSubSectionDTO): void {
+    this.tcOutText = sub.tcout;
+    this.video.editSubSection(sub);
+  }
+
+  playSubsection(sub: VideoSubSectionDTO): void {
+    this.tcOutText = sub.tcout;
+    this.video.playSubSection(sub);
+  }
+
+  playAllSections(): void {
+    const subs = this.video.selectedSource()?.subSections ?? [];
+    this.video.playAllSections(subs);
+  }
 
   // ---------- helpers for template ----------
   formatTime(t: number | null): string {
@@ -72,14 +130,6 @@ export class VideoSourceComponent implements AfterViewInit {
   }
 
   // ---------- private ----------
-  private toSrc(key: VideoKey): string {
-    // because files are in: src/assets/videos/...
-    return key === 'woman'
-      ? 'assets/videos/woman.mp4'
-      : key === 'woman2'
-        ? 'assets/videos/woman2.mp4'
-        : 'assets/videos/anabela.mp4';
-  }
 }
 
 /**

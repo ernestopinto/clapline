@@ -1,19 +1,31 @@
 import { Injectable, effect, signal } from '@angular/core';
+import { VideoSourceDTO, VideoSubSectionDTO } from '../models/video-source.dto';
 
 type TimeSource = 'video' | 'timeline';
 
 @Injectable({ providedIn: 'root' })
 export class ClapVideoSourceService {
+  readonly videoSources = signal<VideoSourceDTO[]>([]);
+  readonly isLoading = signal<boolean>(false);
+
   readonly duration = signal<number>(0);
   readonly currentTime = signal<number>(0);
   readonly isScrubbing = signal<boolean>(false);
+  readonly isPlayingSubSection = signal<boolean>(false);
 
   readonly subIn = signal<number | null>(null);
   readonly subOut = signal<number | null>(null);
+  readonly selectedSource = signal<VideoSourceDTO | null>(null);
 
   private _video: HTMLVideoElement | null = null;
   private _lastSource = signal<TimeSource>('video');
   private _cleanup: (() => void) | null = null;
+  private _rangeStopCleanup: (() => void) | null = null;
+  private _rangeStopRafId: number | null = null;
+  private _rangeStopRvfcId: number | null = null;
+  private _playAllQueue: VideoSubSectionDTO[] | null = null;
+  private _playAllIndex = 0;
+  private _ignoreNextPause = false;
 
   // High-frequency sync loop (video -> service)
   private _syncRunning = false;
@@ -24,17 +36,51 @@ export class ClapVideoSourceService {
   private readonly _epsilon = 1 / 240; // ~0.004s; prevents noisy updates
 
   constructor() {
+    // Simulate loading
+    this.isLoading.set(true);
+    setTimeout(() => {
+      this.videoSources.set([
+        {
+          name: 'Woman on the top of the bed',
+          url: 'assets/videos/woman.mp4',
+          subSections: [
+            { name: 's1', tcin: '00:00:01', tcout: '00:00:02.5' },
+          ]
+        },
+        {
+          name: 'Woman dancing on an ancient monument',
+          url: 'assets/videos/woman2.mp4',
+          subSections: [
+            { name: 's1', tcin: '00:00:02', tcout: '00:00:03' },
+            { name: 's1', tcin: '00:00:04', tcout: '00:00:10.5' },
+            { name: 's1', tcin: '00:00:13', tcout: '00:00:15' }
+          ]
+        },
+        {
+          name: 'Sexy lingerie video',
+          url: 'assets/videos/anabela.mp4',
+          subSections: [
+            { name: 's1', tcin: '00:00:05', tcout: '00:00:10' },
+            { name: 's2', tcin: '00:00:15', tcout: '00:00:20' }
+          ]
+        }
+      ]);
+      this.isLoading.set(false);
+    }, 1500);
+
     // Timeline -> Video seeking (write-through)
     effect(() => {
       const video = this._video;
       const t = this.currentTime();
       const source = this._lastSource();
+      const scrubbing = this.isScrubbing();
 
       if (!video) return;
       if (source !== 'timeline') return;
 
       // Don’t thrash the media element for tiny diffs
-      if (Math.abs(video.currentTime - t) < 0.02) return;
+      const threshold = scrubbing ? 0 : 0.02;
+      if (Math.abs(video.currentTime - t) < threshold) return;
 
       try {
         video.currentTime = t;
@@ -114,10 +160,12 @@ export class ClapVideoSourceService {
     // Important for native scrub bar: these fire when user drags the built-in controls
     const onSeeking = () => {
       updateDuration();
+      this._lastSource.set('video');
       publishFromVideo(); // immediate UI response while dragging
     };
     const onSeeked = () => {
       updateDuration();
+      this._lastSource.set('video');
       publishFromVideo(); // ensure final value is published
     };
 
@@ -148,6 +196,7 @@ export class ClapVideoSourceService {
 
     this._cleanup = () => {
       this._stopSyncLoop();
+      this._clearRangeStop();
 
       video.removeEventListener('loadedmetadata', onLoadedMetadata);
       video.removeEventListener('loadeddata', onLoadedData);
@@ -267,4 +316,232 @@ export class ClapVideoSourceService {
     this.subOut.set(clamped);
   }
 
+  updateSubSectionByIndex(
+    index: number,
+    field: 'name' | 'tcin' | 'tcout',
+    rawValue: string,
+  ): void {
+    const source = this.selectedSource();
+    if (!source) return;
+    if (index < 0 || index >= source.subSections.length) return;
+
+    const updatedSubSections = source.subSections.map((s, i) => {
+      if (i !== index) return s;
+      return { ...s, [field]: rawValue };
+    });
+
+    const updatedSource: VideoSourceDTO = { ...source, subSections: updatedSubSections };
+    this.selectedSource.set(updatedSource);
+
+    const sources = this.videoSources().map((s) =>
+      s.url === updatedSource.url ? updatedSource : s,
+    );
+    this.videoSources.set(sources);
+  }
+
+  editSubSection(sub: VideoSubSectionDTO): void {
+    const a = this._parseTimecodeToSeconds(sub.tcin);
+    const b = this._parseTimecodeToSeconds(sub.tcout);
+    this.setSubSection(a, b);
+  }
+
+  playSubSection(sub: VideoSubSectionDTO): void {
+    const video = this._video;
+    if (!video) return;
+    this._clearPlayAllQueue();
+
+    const a = this._parseTimecodeToSeconds(sub.tcin);
+    const b = this._parseTimecodeToSeconds(sub.tcout);
+    if (a == null || b == null) return;
+
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+
+    this.setSubSection(lo, hi);
+    this._lastSource.set('timeline');
+    this.currentTime.set(lo);
+    this.isPlayingSubSection.set(true);
+
+    try {
+      video.currentTime = lo;
+    } catch {
+      // ignore (seek can fail early)
+    }
+
+    this._installRangeStop(hi);
+    const p = video.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => {
+        this.isPlayingSubSection.set(false);
+        // ignore autoplay restrictions
+      });
+    }
+  }
+
+  playAllSections(subs: VideoSubSectionDTO[]): void {
+    const video = this._video;
+    if (!video) return;
+
+    const queue = subs.filter((s) => {
+      const a = this._parseTimecodeToSeconds(s.tcin);
+      const b = this._parseTimecodeToSeconds(s.tcout);
+      return a != null && b != null;
+    });
+    if (queue.length === 0) return;
+
+    this._playAllQueue = queue;
+    this._playAllIndex = 0;
+    this._playNextInQueue();
+  }
+
+  private _playNextInQueue(): void {
+    if (!this._playAllQueue) return;
+    if (this._playAllIndex >= this._playAllQueue.length) {
+      this._clearPlayAllQueue();
+      return;
+    }
+
+    const sub = this._playAllQueue[this._playAllIndex];
+    const a = this._parseTimecodeToSeconds(sub.tcin);
+    const b = this._parseTimecodeToSeconds(sub.tcout);
+    if (a == null || b == null) {
+      this._playAllIndex += 1;
+      this._playNextInQueue();
+      return;
+    }
+
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+
+    const video = this._video;
+    if (!video) return;
+
+    this.setSubSection(lo, hi);
+    this._lastSource.set('timeline');
+    this.currentTime.set(lo);
+    this.isPlayingSubSection.set(true);
+
+    try {
+      video.currentTime = lo;
+    } catch {
+      // ignore (seek can fail early)
+    }
+
+    this._installRangeStop(hi, () => {
+      this._playAllIndex += 1;
+      this._playNextInQueue();
+    });
+
+    const p = video.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => {
+        this.isPlayingSubSection.set(false);
+        this._clearPlayAllQueue();
+      });
+    }
+  }
+
+  private _clearPlayAllQueue(): void {
+    this._playAllQueue = null;
+    this._playAllIndex = 0;
+  }
+
+  private _installRangeStop(end: number, onEnd?: () => void): void {
+    const video = this._video;
+    if (!video) return;
+
+    this._clearRangeStop();
+
+    const stopAtEnd = () => {
+      try {
+        video.currentTime = end;
+      } catch {
+        // ignore (seek can fail early)
+      }
+      this.currentTime.set(end);
+      this._ignoreNextPause = true;
+      video.pause();
+      this.isPlayingSubSection.set(false);
+      this._clearRangeStop();
+      if (onEnd) onEnd();
+    };
+
+    const tick = () => {
+      if (video.currentTime >= end - this._epsilon) {
+        stopAtEnd();
+        return;
+      }
+      this._rangeStopRafId = requestAnimationFrame(tick);
+    };
+
+    const anyVideo = video as any;
+    if (typeof anyVideo.requestVideoFrameCallback === 'function') {
+      const step = () => {
+        if (video.currentTime >= end - this._epsilon) {
+          stopAtEnd();
+          return;
+        }
+        this._rangeStopRvfcId = anyVideo.requestVideoFrameCallback(step);
+      };
+      this._rangeStopRvfcId = anyVideo.requestVideoFrameCallback(step);
+    } else {
+      this._rangeStopRafId = requestAnimationFrame(tick);
+    }
+    const onPause = () => {
+      if (this._ignoreNextPause) {
+        this._ignoreNextPause = false;
+        return;
+      }
+      this.isPlayingSubSection.set(false);
+      this._clearPlayAllQueue();
+      this._clearRangeStop();
+    };
+
+    video.addEventListener('pause', onPause);
+    this._rangeStopCleanup = () => {
+      video.removeEventListener('pause', onPause);
+      if (this._rangeStopRafId != null) {
+        cancelAnimationFrame(this._rangeStopRafId);
+        this._rangeStopRafId = null;
+      }
+      const any = video as any;
+      if (this._rangeStopRvfcId != null && typeof any.cancelVideoFrameCallback === 'function') {
+        any.cancelVideoFrameCallback(this._rangeStopRvfcId);
+        this._rangeStopRvfcId = null;
+      } else {
+        this._rangeStopRvfcId = null;
+      }
+    };
+  }
+
+  private _clearRangeStop(): void {
+    if (!this._rangeStopCleanup) return;
+    this._rangeStopCleanup();
+    this._rangeStopCleanup = null;
+  }
+
+  private _parseTimecodeToSeconds(raw: string): number | null {
+    const s = raw.trim();
+    if (!s) return null;
+
+    if (/^\d+(\.\d+)?$/.test(s)) return Number(s);
+
+    const parts = s.split(':').map((p) => p.trim());
+    if (parts.some((p) => !/^\d+(\.\d+)?$/.test(p))) return null;
+
+    if (parts.length === 2) {
+      const mm = Number(parts[0]);
+      const ss = Number(parts[1]);
+      return mm * 60 + ss;
+    }
+
+    if (parts.length === 3) {
+      const hh = Number(parts[0]);
+      const mm = Number(parts[1]);
+      const ss = Number(parts[2]);
+      return hh * 3600 + mm * 60 + ss;
+    }
+
+    return null;
+  }
 }

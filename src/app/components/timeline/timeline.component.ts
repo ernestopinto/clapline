@@ -56,16 +56,18 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   subOverlayWidthPx = 120;
   subOverlayLabel = '';
 
-  // ✅ Effects created in injection context
   private readonly _onDuration = effect(() => {
     const d = this.video.duration();
     if (d > 0) {
       this.viewStart = 0;
       this.viewEnd = d;
       this.recomputeScale();
+    } else {
+      // If duration is 0, we should still try to render if we have a selected source
+      // but maybe it's too early.
+      this.requestRender();
     }
     if (this.viewReady && this.hasCtx) this.updateOverlay();
-    this.requestRender();
   });
 
   private readonly _onTime = effect(() => {
@@ -77,7 +79,10 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   private readonly _onSubSection = effect(() => {
     this.video.subIn();
     this.video.subOut();
+    this.video.isPlayingSubSection();
     this.video.duration();
+    this.video.selectedSource();
+    this.video.videoSources(); // Track sources too just in case
     if (!this.viewReady || !this.hasCtx) return;
     this.updateOverlay();
     this.requestRender();
@@ -198,6 +203,11 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
     alert('✅ I checked!');
 
+    this.video.setSubIn(null);
+    this.video.setSubOut(null);
+    this.updateOverlay();
+    this.requestRender();
+
     // later:
     // this.video.addSubSection({ in: a, out: b });
   }
@@ -241,6 +251,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
     const span = Math.max(0.001, this.viewEnd - this.viewStart);
     this.pxPerSecond = usableW / span;
+    this.requestRender();
   }
 
   private resizeAndRender(): void {
@@ -310,8 +321,14 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     this.drawLane(ctx, cssW);
     this.drawRuler(ctx, cssW);
 
+    // SUBSECTIONS after the Lane drawing
+
     // subsection overlay on lane
     this.drawSubSection(ctx, cssW);
+    // loaded subsections
+    this.drawSourceSubSections(ctx, cssW);
+
+    ///////////////////////////////////////
 
     ctx.restore();
 
@@ -382,12 +399,63 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
   }
 
+  private drawSourceSubSections(ctx: CanvasRenderingContext2D, cssW: number): void {
+    const source = this.video.selectedSource();
+    if (!source || !source.subSections || source.subSections.length === 0) return;
+
+    // We can draw even if duration is 0, but timeToX needs a sane pxPerSecond.
+    // If duration is 0, viewEnd might be 10 (default), which is fine for dummy data.
+
+    const laneTop = this.rulerHeight + this.lanePaddingTop;
+    const y = laneTop;
+    const h = this.laneHeight;
+    const minX = this.paddingX;
+    const maxX = cssW - this.paddingX;
+
+    for (const sub of source.subSections) {
+      const tIn = this.parseHHMMSS(sub.tcin);
+      const tOut = this.parseHHMMSS(sub.tcout);
+
+      const x1 = this.timeToX(tIn);
+      const x2 = this.timeToX(tOut);
+
+      const left = Math.min(x1, x2);
+      const right = Math.max(x1, x2);
+
+      const cl = Math.max(minX, Math.min(maxX, left));
+      const cr = Math.max(minX, Math.min(maxX, right));
+      const width = cr - cl;
+
+      if (width <= 0) continue;
+
+      ctx.save();
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#22c55e'; // green-500
+      ctx.fillRect(cl, y, width, h);
+
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = '#16a34a'; // green-600
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cl + 0.5, y + 0.5, width - 1, h - 1);
+      ctx.restore();
+    }
+  }
+
+  private parseHHMMSS(tc: string): number {
+    const parts = tc.split(':').map(Number);
+    if (parts.length === 3) {
+      return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+    if (parts.length === 2) {
+      return parts[0] * 60 + parts[1];
+    }
+    return parts[0] || 0;
+  }
+
   private drawSubSection(ctx: CanvasRenderingContext2D, cssW: number): void {
-    const d = this.video.duration();
     const a = this.video.subIn();
     const b = this.video.subOut();
 
-    if (!(d > 0)) return;
     if (a == null || b == null) return;
 
     const x1 = this.timeToX(a);
@@ -426,8 +494,15 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     const d = this.video.duration();
     const a = this.video.subIn();
     const b = this.video.subOut();
+    const isPlayingSubSection = this.video.isPlayingSubSection();
 
-    if (!(d > 0) || a == null || b == null || Math.abs(a - b) < 0.001) {
+    if (
+      isPlayingSubSection ||
+      !(d > 0) ||
+      a == null ||
+      b == null ||
+      Math.abs(a - b) < 0.001
+    ) {
       this.showSubOverlay = false;
       return;
     }
@@ -455,8 +530,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   }
 
   private timeToX(t: number): number {
-    const clamped = Math.max(this.viewStart, Math.min(this.viewEnd, t));
-    return this.paddingX + (clamped - this.viewStart) * this.pxPerSecond;
+    return this.paddingX + (t - this.viewStart) * this.pxPerSecond;
   }
 
   private formatTime(t: number): string {
