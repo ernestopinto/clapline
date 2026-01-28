@@ -1,5 +1,27 @@
 # Clapline
 
+<img src="src/assets/images/clapline1.png" alt="Clapline preview 1" width="700">
+<img src="src/assets/images/clapline2.png" alt="Clapline preview 2" width="700">
+
+## Current features
+
+- Video source picker with preloaded MP4 samples from `src/assets/videos`.
+- HTML5 video player synced to a shared state service for duration and current time.
+- Canvas-based timeline with ruler ticks, edit lane, playhead, and zoom controls.
+- Pointer scrubbing on the timeline updates playback time and sets the TCIN marker.
+- Subsection marking with a TCOUT input, overlay confirmation, and clear action.
+- Subsection list with inline editing for name, TCIN, and TCOUT values.
+- Play a single subsection or play all subsections sequentially.
+- Loading overlay while sources are being initialized.
+
+## Technical notes
+
+- Angular 21 with standalone components and lazy-loaded routes (`/home`, `/docs`).
+- Signals drive state for time, selection, subsections, and UI updates.
+- Timeline rendering uses `canvas` with device-pixel-ratio scaling and ResizeObserver.
+- Video sync prefers `requestVideoFrameCallback` with RAF fallback.
+- Styling is Tailwind CSS only (no component-specific CSS).
+
 This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 21.1.0.
 
 ## Development server

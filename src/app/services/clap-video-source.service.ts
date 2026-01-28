@@ -41,10 +41,10 @@ export class ClapVideoSourceService {
     setTimeout(() => {
       this.videoSources.set([
         {
-          name: 'Woman on the top of the bed',
-          url: 'assets/videos/woman.mp4',
+          name: 'Woman dancing on the street',
+          url: 'assets/videos/womanDancing.mp4',
           subSections: [
-            { name: 's1', tcin: '00:00:01', tcout: '00:00:02.5' },
+            { name: 's1', tcin: '00:00:03', tcout: '00:00:04' },
           ]
         },
         {
@@ -57,11 +57,11 @@ export class ClapVideoSourceService {
           ]
         },
         {
-          name: 'Sexy lingerie video',
-          url: 'assets/videos/anabela.mp4',
+          name: 'Cats',
+          url: 'assets/videos/cats.mp4',
           subSections: [
-            { name: 's1', tcin: '00:00:05', tcout: '00:00:10' },
-            { name: 's2', tcin: '00:00:15', tcout: '00:00:20' }
+            { name: 's1', tcin: '00:00:02', tcout: '00:00:4' },
+            { name: 's2', tcin: '00:00:5', tcout: '00:00:8' }
           ]
         }
       ]);
